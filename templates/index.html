@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Doorbell - Control Panel</title>
+  <style>
+    :root {
+      --bg: #11111b;
+      --card-bg: #1e1e2e;
+      --text: #cdd6f4;
+      --subtext: #a6adc8;
+      --accent: #89b4fa;
+      --green: #a6e3a1;
+      --red: #f38ba8;
+      --border: #313244;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 2rem 1rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    .header h1 {
+      margin: 0 0 0.5rem 0;
+      color: var(--accent);
+    }
+    .container {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2rem;
+      width: 100%;
+      max-width: 1050px;
+    }
+    @media (min-width: 850px) {
+      .container {
+        grid-template-columns: 3fr 2fr;
+      }
+    }
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+    h2 {
+      margin-top: 0;
+      font-size: 1.25rem;
+      color: var(--green);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .stream-box {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+    }
+    .stream-box img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .stream-status {
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--subtext);
+      display: flex;
+      justify-content: space-between;
+    }
+    .form-group {
+      margin-bottom: 1.2rem;
+    }
+    label {
+      display: block;
+      margin-bottom: 0.4rem;
+      font-size: 0.9rem;
+      color: var(--subtext);
+    }
+    input[type="text"], input[type="file"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.7rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background-color: #181825;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+    input[type="file"] {
+      cursor: pointer;
+    }
+    button {
+      width: 100%;
+      padding: 0.8rem;
+      background-color: var(--green);
+      color: #11111b;
+      border: none;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover {
+      opacity: 0.9;
+    }
+    button:disabled {
+      background-color: var(--border);
+      cursor: not-allowed;
+    }
+    .status-msg {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      display: none;
+      white-space: pre-wrap;
+    }
+    .status-msg.success {
+      display: block;
+      background-color: rgba(166, 227, 161, 0.15);
+      color: var(--green);
+      border: 1px solid var(--green);
+    }
+    .status-msg.error {
+      display: block;
+      background-color: rgba(243, 139, 168, 0.15);
+      color: var(--red);
+      border: 1px solid var(--red);
+    }
+    .people-list {
+      margin-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      padding-top: 1rem;
+    }
+    .people-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .tag {
+      background-color: #313244;
+      padding: 0.3rem 0.6rem;
+      border-radius: 14px;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>🔔 Smart Doorbell AI Monitor</h1>
+    <p style="color: var(--subtext); margin: 0;">Transmisión en directo e indexación facial</p>
+  </div>
+
+  <div class="container">
+    <!-- Panel de Transmisión -->
+    <div class="card">
+      <h2>📹 Vista en Directo (ESP32-CAM)</h2>
+      <div class="stream-box">
+        <img id="camStream" src="/video_feed" alt="Cargando video...">
+      </div>
+      <div class="stream-status">
+        <span>Fuente: <code>FastAPI Relay (/video_feed)</code></span>
+        <span style="color: var(--green);">● Conectado</span>
+      </div>
+    </div>
+
+    <!-- Panel de Registro -->
+    <div class="card">
+      <h2>👤 Registrar Persona</h2>
+      
+      <div class="form-group">
+        <label for="personName">Nombre y Apellido:</label>
+        <input type="text" id="personName" required placeholder="Ej: Ivan Cordova">
+      </div>
+
+      <!-- Botón 1: Captura instantánea del stream en vivo -->
+      <button type="button" id="btnCaptureStream" style="background-color: #89b4fa; margin-bottom: 1.2rem;">
+        📸 Capturar Foto de la Cámara en Vivo
+      </button>
+
+      <div style="text-align: center; margin: 0.5rem 0 1rem; color: var(--subtext); font-size: 0.85rem;">
+        — o subir archivo de imagen —
+      </div>
+
+      <!-- Formulario para subir archivo local -->
+      <form id="registerForm">
+        <div class="form-group">
+          <input type="file" id="fileInput" accept="image/*">
+        </div>
+        <button type="submit" id="submitBtn">Subir Archivo de Imagen</button>
+      </form>
+
+      <div id="statusBox" class="status-msg"></div>
+
+      <div class="people-list">
+        <label>Personas registradas en memoria:</label>
+        <div class="people-tags" id="peopleContainer"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('registerForm');
+    const fileInput = document.getElementById('fileInput');
+    const submitBtn = document.getElementById('submitBtn');
+    const statusBox = document.getElementById('statusBox');
+    const peopleContainer = document.getElementById('peopleContainer');
+    const btnCaptureStream = document.getElementById('btnCaptureStream');
+    const personName = document.getElementById('personName');
+
+    function showStatus(msg, isSuccess) {
+      statusBox.innerText = msg;
+      statusBox.className = isSuccess ? 'status-msg success' : 'status-msg error';
+      statusBox.style.display = 'block';
+    }
+
+    function actualizarPersonas() {
+      fetch('/')
+        .then(res => res.json())
+        .then(data => {
+          peopleContainer.innerHTML = '';
+          if (!data.registered_people || data.registered_people.length === 0) {
+            peopleContainer.innerHTML = '<span style="color: var(--subtext); font-size: 0.85rem;">No hay personas registradas aún.</span>';
+            return;
+          }
+          data.registered_people.forEach(p => {
+            const span = document.createElement('span');
+            span.className = 'tag';
+            span.innerText = p;
+            peopleContainer.appendChild(span);
+          });
+        })
+        .catch(() => {
+          peopleContainer.innerHTML = '<span style="color: var(--red); font-size: 0.85rem;">Error al sincronizar lista.</span>';
+        });
+    }
+
+    // 1. Registro mediante archivo subido
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const nameVal = personName.value.trim();
+      if (!nameVal) {
+        showStatus('⚠️ Por favor escribe el nombre arriba antes de continuar.', false);
+        return;
+      }
+
+      if (!fileInput.files || fileInput.files.length === 0) {
+        showStatus('⚠️ Selecciona un archivo de imagen primero.', false);
+        return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.innerText = 'Indexando rostro...';
+      statusBox.style.display = 'none';
+
+      // Adjuntar explícitamente ambos campos para cumplir con FastAPI
+      const formData = new FormData();
+      formData.append('name', nameVal);
+      formData.append('file', fileInput.files[0]);
+
+      try {
+        const response = await fetch('/faces/register', {
+          method: 'POST',
+          body: formData
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          showStatus(`✅ ${result.message}`, true);
+          personName.value = '';
+          form.reset();
+          actualizarPersonas();
+        } else {
+          showStatus(`❌ ${result.detail || 'Fallo al procesar la imagen'}`, false);
+        }
+      } catch (err) {
+        showStatus('❌ Error de comunicación con el backend.', false);
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerText = 'Subir Archivo de Imagen';
+      }
+    });
+
+    // 2. Registro directo desde la cámara en vivo
+    btnCaptureStream.addEventListener('click', async () => {
+      const nameVal = personName.value.trim();
+      if (!nameVal) {
+        showStatus('⚠️ Por favor escribe un nombre antes de capturar.', false);
+        return;
+      }
+
+      btnCaptureStream.disabled = true;
+      btnCaptureStream.innerText = 'Capturando e indexando...';
+      statusBox.style.display = 'none';
+
+      const formData = new FormData();
+      formData.append('name', nameVal);
+
+      try {
+        const res = await fetch('/faces/register-from-stream', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+
+        if (res.ok) {
+          showStatus(`✅ ${data.message}`, true);
+          personName.value = '';
+          actualizarPersonas();
+        } else {
+          showStatus(`❌ ${data.detail || 'Error al capturar'}`, false);
+        }
+      } catch (err) {
+        showStatus('❌ Error al conectar con el servidor.', false);
+      } finally {
+        btnCaptureStream.disabled = false;
+        btnCaptureStream.innerText = '📸 Capturar Foto de la Cámara en Vivo';
+      }
+    });
+
+    actualizarPersonas();
+  </script>
+</body>
+</html>
