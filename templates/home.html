@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Doorbell - Panel Principal</title>
+  <style>
+    :root {
+      --bg: #11111b; --card: #1e1e2e; --border: #313244;
+      --text: #cdd6f4; --sub: #a6adc8; --accent: #89b4fa;
+      --green: #a6e3a1; --red: #f38ba8; --yellow: #f9e2af;
+    }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 1.5rem; }
+    header { display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto 1.5rem; }
+    .btn { padding: 8px 14px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    .btn-primary { background: var(--accent); color: #111; }
+    .btn-danger { background: var(--red); color: #111; }
+    .btn-toggle { background: var(--green); color: #111; }
+    .btn-toggle.inactive { background: var(--yellow); color: #111; }
+    
+    .grid { display: grid; grid-template-columns: 1fr; gap: 1.5rem; max-width: 1200px; margin: 0 auto; }
+    @media(min-width: 900px) { .grid { grid-template-columns: 7fr 5fr; } }
+
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.2rem; }
+    .stream-box { width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    .stream-box img { width: 100%; height: 100%; object-fit: contain; }
+
+    .control-row { display: flex; gap: 8px; margin-top: 1rem; align-items: center; }
+    input[type="text"] { flex: 1; padding: 8px 12px; background: #181825; border: 1px solid var(--border); color: #fff; border-radius: 6px; }
+
+    /* Detecciones */
+    .history-list { max-height: 480px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+    .event-card { display: flex; gap: 12px; background: #181825; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+    .event-card img { width: 80px; height: 60px; object-fit: cover; border-radius: 4px; }
+    .event-info { flex: 1; font-size: 0.85rem; }
+
+    /* Personas */
+    .persons-grid { display: grid; grid-template-columns: 1fr; gap: 8px; max-height: 250px; overflow-y: auto; margin-top: 10px; }
+    .person-item { display: flex; justify-content: space-between; align-items: center; background: #181825; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h2>🔔 Smart Doorbell Vision</h2>
+    <a href="/register-view" class="btn btn-primary">➕ Registrar Nueva Persona</a>
+  </header>
+
+  <div class="grid">
+    <!-- Columna Izquierda: Stream y Controles -->
+    <div>
+      <div class="card">
+        <div class="stream-box">
+          <img src="/video_feed" alt="Video en Vivo">
+        </div>
+        
+        <div class="control-row">
+          <button id="btnAiToggle" class="btn btn-toggle" onclick="toggleAI()">🟢 IA: Detección Activa</button>
+          <span id="camStatus" style="font-size: 0.85rem; color: var(--sub);">Estado: Sincronizando...</span>
+        </div>
+
+        <div class="control-row">
+          <label style="font-size: 0.85rem; color: var(--sub);">URL Cámara:</label>
+          <input type="text" id="streamInput" placeholder="http://192.168.68.XXX/mjpeg">
+          <button class="btn btn-primary" onclick="cambiarUrl()">Guardar</button>
+        </div>
+      </div>
+
+      <!-- Gestor de Personas -->
+      <div class="card" style="margin-top: 1.5rem;">
+        <h3>👥 Personas Registradas</h3>
+        <div class="persons-grid" id="personsContainer">Cargando personas...</div>
+      </div>
+    </div>
+
+    <!-- Columna Derecha: Registro de Detecciones en Vivo -->
+    <div class="card">
+      <h3>🚨 Detecciones Recientes</h3>
+      <div class="history-list" id="historyContainer">
+        <p style="color: var(--sub); font-size: 0.9rem;">Sin eventos detectados todavía.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function updateStatus() {
+      try {
+        const res = await fetch('/api/system/status');
+        const data = await res.json();
+        
+        // Estado cámara y URL
+        document.getElementById('streamInput').value = data.stream_url;
+        document.getElementById('camStatus').innerHTML = data.camera_online 
+          ? '<span style="color:var(--green)">● Cámara Conectada</span>' 
+          : '<span style="color:var(--red)">● Cámara Desconectada</span>';
+
+        // Botón IA
+        const btnAi = document.getElementById('btnAiToggle');
+        if (data.ai_active) {
+          btnAi.className = 'btn btn-toggle';
+          btnAi.innerText = '🟢 IA: Detección Activa';
+        } else {
+          btnAi.className = 'btn btn-toggle inactive';
+          btnAi.innerText = '⏸️ IA: Pausada';
+        }
+
+        // Historial
+        const histContainer = document.getElementById('historyContainer');
+        if (data.history && data.history.length > 0) {
+          histContainer.innerHTML = data.history.map(ev => `
+            <div class="event-card">
+              <a href="${ev.image}" target="_blank"><img src="${ev.image}"></a>
+              <div class="event-info">
+                <div><strong>${ev.time}</strong></div>
+                <div style="color: var(--accent);">Identificado: ${ev.people.join(', ')}</div>
+                <div style="color: var(--sub);">Personas en escena: ${ev.count}</div>
+              </div>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        console.error("Error al actualizar estado:", e);
+      }
+    }
+
+    async function loadPersons() {
+      const res = await fetch('/api/persons');
+      const list = await res.json();
+      const cont = document.getElementById('personsContainer');
+      if (list.length === 0) {
+        cont.innerHTML = '<span style="color: var(--sub); font-size: 0.85rem;">No hay personas registradas.</span>';
+        return;
+      }
+      cont.innerHTML = list.map(p => `
+        <div class="person-item">
+          <div>
+            <strong>${p.name}</strong> <span style="font-size:0.8rem; color:var(--sub)">(${p.phone || 'Sin tel'})</span>
+            <div style="font-size:0.75rem; color:var(--sub);">${p.notes}</div>
+          </div>
+          <button class="btn btn-danger" style="padding:4px 8px; font-size:0.75rem;" onclick="borrarPersona('${p.id}')">Borrar</button>
+        </div>
+      `).join('');
+    }
+
+    async function toggleAI() {
+      await fetch('/api/system/toggle-ai', { method: 'POST' });
+      updateStatus();
+    }
+
+    async function cambiarUrl() {
+      const url = document.getElementById('streamInput').value;
+      await fetch('/api/system/stream-url', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ url })
+      });
+      alert('URL actualizada');
+      updateStatus();
+    }
+
+    async function borrarPersona(id) {
+      if (!confirm('¿Eliminar a esta persona?')) return;
+      await fetch(`/api/persons/${id}`, { method: 'DELETE' });
+      loadPersons();
+    }
+
+    setInterval(updateStatus, 2500);
+    updateStatus();
+    loadPersons();
+  </script>
+</body>
+</html>

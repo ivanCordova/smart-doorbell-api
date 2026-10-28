@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Registrar Persona - Smart Doorbell</title>
+  <style>
+    :root {
+      --bg: #11111b; --card: #1e1e2e; --border: #313244;
+      --text: #cdd6f4; --sub: #a6adc8; --accent: #89b4fa;
+      --green: #a6e3a1; --red: #f38ba8;
+    }
+    body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); padding: 2rem 1rem; display: flex; justify-content: center; margin: 0; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 2rem; width: 100%; max-width: 550px; }
+    h2 { margin-top: 0; color: var(--accent); }
+    .form-group { margin-bottom: 1rem; }
+    label { display: block; font-size: 0.85rem; color: var(--sub); margin-bottom: 0.3rem; }
+    input[type="text"], input[type="file"] { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 6px; border: 1px solid var(--border); background: #181825; color: #fff; }
+    button { width: 100%; padding: 12px; border-radius: 6px; border: none; font-weight: bold; cursor: pointer; margin-top: 8px; }
+    .btn-stream { background: var(--accent); color: #111; }
+    .btn-file { background: var(--green); color: #111; }
+    .status-msg { margin-top: 1rem; padding: 10px; border-radius: 6px; display: none; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <a href="/" style="color: var(--accent); text-decoration: none; font-size: 0.9rem;">← Volver al Panel</a>
+    <h2>👤 Registrar Persona</h2>
+
+    <div class="form-group">
+      <label>Nombre Completo:</label>
+      <input type="text" id="name" required placeholder="Ej: Ivan Cordova">
+    </div>
+
+    <div class="form-group">
+      <label>Teléfono (opcional):</label>
+      <input type="text" id="phone" placeholder="Ej: +52 ...">
+    </div>
+
+    <div class="form-group">
+      <label>Notas / Parentesco (opcional):</label>
+      <input type="text" id="notes" placeholder="Ej: Familia, Repartidor habitual, Amigo">
+    </div>
+
+    <hr style="border-color: var(--border); margin: 1.5rem 0;">
+
+    <button type="button" class="btn-stream" id="btnLive" onclick="enviarRegistro(true)">
+      📸 Capturar Rostro desde Cámara en Vivo
+    </button>
+
+    <div style="text-align: center; margin: 0.8rem 0; color: var(--sub); font-size: 0.85rem;">— o subir foto guardada —</div>
+
+    <div class="form-group">
+      <input type="file" id="fileInput" accept="image/*">
+    </div>
+    <button type="button" class="btn-file" id="btnFile" onclick="enviarRegistro(false)">
+      💾 Guardar con Archivo
+    </button>
+
+    <div id="statusBox" class="status-msg"></div>
+  </div>
+
+  <script>
+    async function enviarRegistro(fromStream) {
+      const name = document.getElementById('name').value.trim();
+      const phone = document.getElementById('phone').value.trim();
+      const notes = document.getElementById('notes').value.trim();
+      const fileInput = document.getElementById('fileInput');
+      const statusBox = document.getElementById('statusBox');
+
+      if (!name) {
+        mostrarStatus('Ingresa un nombre.', false);
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append('name', name);
+      fd.append('phone', phone);
+      fd.append('notes', notes);
+
+      if (!fromStream) {
+        if (!fileInput.files || fileInput.files.length === 0) {
+          mostrarStatus('Selecciona un archivo de imagen.', false);
+          return;
+        }
+        fd.append('file', fileInput.files[0]);
+      }
+
+      mostrarStatus('Indexando biométricos...', true);
+
+      try {
+        const res = await fetch('/api/persons/register', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (res.ok) {
+          mostrarStatus('✅ ' + data.message, true);
+          document.getElementById('name').value = '';
+          document.getElementById('phone').value = '';
+          document.getElementById('notes').value = '';
+          fileInput.value = '';
+        } else {
+          mostrarStatus('❌ ' + (data.detail || 'Fallo de registro'), false);
+        }
+      } catch (err) {
+        mostrarStatus('❌ Error al conectar con el servidor', false);
+      }
+    }
+
+    function mostrarStatus(txt, ok) {
+      const box = document.getElementById('statusBox');
+      box.innerText = txt;
+      box.style.display = 'block';
+      box.style.background = ok ? 'rgba(166, 227, 161, 0.2)' : 'rgba(243, 139, 168, 0.2)';
+      box.style.color = ok ? '#a6e3a1' : '#f38ba8';
+    }
+  </script>
+</body>
+</html>
