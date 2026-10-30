@@ -9,7 +9,16 @@ services:
       - "8000:8000"
     environment:
       - ESP32_STREAM_URL=http://192.168.68.108/mjpeg
+    # Permite acceso dinámico al hardware cuando se enchufe por USB
+    privileged: true
+    group_add:
+      - audio
     volumes:
+      - ./app:/code/app
+      - ./templates:/code/templates
       - ./captures:/code/captures
       - ./known_faces:/code/known_faces
-      - ./templates:/code/templates
+      - ./models:/code/models
+      # Montaje como volumen opcional en lugar de 'device'
+      - /dev/snd:/dev/snd
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -83,45 +83,51 @@
   </div>
 
   <script>
+    let isEditingUrl = false;
+
+    document.getElementById('streamInput').addEventListener('focus', () => { isEditingUrl = true; });
+    document.getElementById('streamInput').addEventListener('blur', () => { isEditingUrl = false; });
+    
     async function updateStatus() {
-      try {
-        const res = await fetch('/api/system/status');
-        const data = await res.json();
-        
-        // Estado cámara y URL
-        document.getElementById('streamInput').value = data.stream_url;
-        document.getElementById('camStatus').innerHTML = data.camera_online 
-          ? '<span style="color:var(--green)">● Cámara Conectada</span>' 
-          : '<span style="color:var(--red)">● Cámara Desconectada</span>';
-
-        // Botón IA
-        const btnAi = document.getElementById('btnAiToggle');
-        if (data.ai_active) {
-          btnAi.className = 'btn btn-toggle';
-          btnAi.innerText = '🟢 IA: Detección Activa';
-        } else {
-          btnAi.className = 'btn btn-toggle inactive';
-          btnAi.innerText = '⏸️ IA: Pausada';
-        }
-
-        // Historial
-        const histContainer = document.getElementById('historyContainer');
-        if (data.history && data.history.length > 0) {
-          histContainer.innerHTML = data.history.map(ev => `
-            <div class="event-card">
-              <a href="${ev.image}" target="_blank"><img src="${ev.image}"></a>
-              <div class="event-info">
-                <div><strong>${ev.time}</strong></div>
-                <div style="color: var(--accent);">Identificado: ${ev.people.join(', ')}</div>
-                <div style="color: var(--sub);">Personas en escena: ${ev.count}</div>
-              </div>
-            </div>
-          `).join('');
-        }
-      } catch (e) {
-        console.error("Error al actualizar estado:", e);
-      }
+  try {
+    const res = await fetch('/api/system/status');
+    const data = await res.json();
+    
+    // Solo actualizar el input si el usuario NO está escribiendo en él
+    if (!isEditingUrl) {
+      document.getElementById('streamInput').value = data.stream_url;
     }
+
+    document.getElementById('camStatus').innerHTML = data.camera_online 
+      ? '<span style="color:var(--green)">● Cámara Conectada</span>' 
+      : '<span style="color:var(--red)">● Cámara Desconectada</span>';
+
+    const btnAi = document.getElementById('btnAiToggle');
+    if (data.ai_active) {
+      btnAi.className = 'btn btn-toggle';
+      btnAi.innerText = '🟢 IA: Detección Activa';
+    } else {
+      btnAi.className = 'btn btn-toggle inactive';
+      btnAi.innerText = '⏸️ IA: Pausada';
+    }
+
+    const histContainer = document.getElementById('historyContainer');
+    if (data.history && data.history.length > 0) {
+      histContainer.innerHTML = data.history.map(ev => `
+        <div class="event-card">
+          <a href="${ev.image}" target="_blank"><img src="${ev.image}"></a>
+          <div class="event-info">
+            <div><strong>${ev.time}</strong></div>
+            <div style="color: var(--accent);">Identificado: ${ev.people.join(', ')}</div>
+            <div style="color: var(--sub);">Personas en escena: ${ev.count}</div>
+          </div>
+        </div>
+      `).join('');
+    }
+  } catch (e) {
+    console.error("Error al actualizar estado:", e);
+  }
+}
 
     async function loadPersons() {
       const res = await fetch('/api/persons');
@@ -148,14 +154,29 @@
     }
 
     async function cambiarUrl() {
-      const url = document.getElementById('streamInput').value;
-      await fetch('/api/system/stream-url', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ url })
-      });
-      alert('URL actualizada');
-      updateStatus();
+      const url = document.getElementById('streamInput').value.trim();
+      if (!url) {
+        alert("Por favor ingresa una URL válida");
+        return;
+      }
+      
+      try {
+        const res = await fetch('/api/system/stream-url', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ url: url })
+        });
+        const result = await res.json();
+        if (res.ok) {
+          alert("✅ URL actualizada correctamente. Reconectando...");
+          isEditingUrl = false;
+          updateStatus();
+        } else {
+          alert("❌ Error: " + (result.detail || "No se pudo actualizar"));
+        }
+      } catch (e) {
+        alert("❌ Error al comunicarse con el servidor");
+      }
     }
 
     async function borrarPersona(id) {

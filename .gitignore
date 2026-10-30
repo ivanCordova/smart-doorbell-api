@@ -1,2 +1,5 @@
 captures/
 known_faces/
+models/
+app/__pycache__/
+yolo11n.pt

@@ -23,6 +23,7 @@ DB_FILE = "known_faces/persons.json"
 
 os.makedirs(CAPTURES_DIR, exist_ok=True)
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
+cap_stream = None
 
 ALERT_COOLDOWN = 6.0
 FRAME_CHECK_INTERVAL = 0.5
@@ -153,34 +154,40 @@ def log_detection(annotated_frame, count: int, people: List[str]):
 
 # --- Monitor de Video y Detección ---
 async def stream_monitor_loop():
-    global latest_jpeg_frame
+    global latest_jpeg_frame, cap_stream
     while True:
+        url_actual = system_state["stream_url"]
         try:
-            url = system_state["stream_url"]
-            cap = cv2.VideoCapture(url)
-            if not cap.isOpened():
+            print(f"📡 Intentando conectar al stream: {url_actual}")
+            # Ejecutar VideoCapture en hilo separado para no congelar asyncio
+            cap_stream = await asyncio.to_thread(cv2.VideoCapture, url_actual)
+
+            if not cap_stream.isOpened():
                 system_state["camera_online"] = False
+                print(f"⚠️ No se pudo abrir el stream en {url_actual}. Reintentando en 3s...")
                 await asyncio.sleep(3)
                 continue
 
             system_state["camera_online"] = True
+            print(f"✅ Conectado exitosamente a {url_actual}")
             last_check = 0.0
             last_alert = 0.0
 
-            while cap.isOpened():
-                # Si el usuario cambió la URL, rompemos el ciclo para conectar al nuevo stream
-                if system_state["stream_url"] != url:
+            while cap_stream.isOpened():
+                # Si la URL global cambió mediante la API, salir para reconectar
+                if system_state["stream_url"] != url_actual:
+                    print(f"🔄 Cambio de URL detectado ({url_actual} -> {system_state['stream_url']}). Reiniciando conexión...")
                     break
 
-                ret, frame = cap.read()
+                ret, frame = await asyncio.to_thread(cap_stream.read)
                 if not ret:
+                    print("⚠️ Fotograma no recibido o corte de stream.")
                     break
 
                 _, buffer = cv2.imencode('.jpg', frame)
                 latest_jpeg_frame = buffer.tobytes()
 
                 now = time.time()
-                # Ejecutar IA solo si está habilitada por el usuario
                 if system_state["ai_active"] and (now - last_check >= FRAME_CHECK_INTERVAL):
                     last_check = now
                     results = yolo_model.predict(source=frame, classes=[0], conf=0.55, verbose=False)
@@ -201,10 +208,15 @@ async def stream_monitor_loop():
 
                 await asyncio.sleep(0.01)
 
-            cap.release()
+            if cap_stream is not None:
+                cap_stream.release()
             system_state["camera_online"] = False
+
         except Exception as e:
-            print(f"Error en video loop: {e}")
+            print(f"❌ Error en monitor de video: {e}")
+            system_state["camera_online"] = False
+            if cap_stream is not None:
+                cap_stream.release()
             await asyncio.sleep(3)
 
 @asynccontextmanager
@@ -264,8 +276,19 @@ class StreamConfig(BaseModel):
 
 @app.post("/api/system/stream-url")
 def update_stream_url(config: StreamConfig):
-    system_state["stream_url"] = config.url.strip()
-    return {"status": "ok", "message": f"URL actualizada a {system_state['stream_url']}"}
+    global cap_stream
+    nueva_url = config.url.strip()
+    if not nueva_url:
+        raise HTTPException(400, "La URL no puede estar vacía")
+    
+    print(f"➡️ Recibida petición para cambiar URL a: {nueva_url}")
+    system_state["stream_url"] = nueva_url
+    
+    # Forzar la liberación del capture actual para desbloquear read()
+    if cap_stream is not None and cap_stream.isOpened():
+        cap_stream.release()
+
+    return {"status": "ok", "message": f"URL actualizada a {nueva_url}"}
 
 @app.post("/api/system/toggle-ai")
 def toggle_ai():
