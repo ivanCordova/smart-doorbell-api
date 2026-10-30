@@ -1,5 +1,9 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
 captures/
 known_faces/
-models/
-app/__pycache__/
-yolo11n.pt
+models/*
+!models/.gitkeep
+*.pt
