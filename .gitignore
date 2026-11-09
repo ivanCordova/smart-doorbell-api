@@ -2,8 +2,12 @@ venv/
 .venv/
 __pycache__/
 *.pyc
-captures/
-known_faces/
-models/*
-!models/.gitkeep
+.env
+
+services/api/captures/
+services/api/known_faces/
+services/api/models/*
+!services/api/models/.gitkeep
+
+services/voice/models/
 *.pt

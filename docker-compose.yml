@@ -1,18 +1,45 @@
+name: smart-doorbell
+
 services:
   doorbell-api:
-    build: .
+    build:
+      context: ./services/api
     container_name: doorbell_api
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      ESP32_STREAM_URL: http://192.168.68.108/mjpeg
+      ESP32_STREAM_URL: ${ESP32_STREAM_URL:-http://192.168.68.108/mjpeg}
+      VOICE_SERVICE_URL: http://doorbell-voice:8001
     volumes:
-      - ./captures:/code/captures
-      - ./known_faces:/code/known_faces
+      - ./services/api/captures:/code/captures
+      - ./services/api/known_faces:/code/known_faces
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/status', timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+    depends_on:
+      - doorbell-voice
+
+  doorbell-voice:
+    build:
+      context: ./services/voice
+    container_name: doorbell_voice
+    restart: unless-stopped
+    privileged: true
+    group_add:
+      - "${AUDIO_GID:-29}"
+    expose:
+      - "8001"
+    environment:
+      API_SERVICE_URL: http://doorbell-api:8000
+    volumes:
+      - /dev/snd:/dev/snd
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

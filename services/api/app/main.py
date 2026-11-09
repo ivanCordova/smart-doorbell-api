@@ -4,6 +4,7 @@ import json
 import time
 import asyncio
 import threading
+import urllib.request
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Tuple
@@ -21,6 +22,7 @@ CAPTURES_DIR = "captures"
 KNOWN_FACES_DIR = "known_faces"
 MODELS_DIR = "models"
 DB_FILE = os.path.join(KNOWN_FACES_DIR, "persons.json")
+VOICE_SERVICE_URL = os.getenv("VOICE_SERVICE_URL", "http://doorbell-voice:8001")
 
 DETECTOR_MODEL = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
 RECOGNIZER_MODEL = os.path.join(MODELS_DIR, "face_recognition_sface.onnx")
@@ -184,6 +186,12 @@ def log_detection(frame: np.ndarray, detections: List[Tuple[str, Tuple[int, int,
         del system_state["history"][MAX_HISTORY:]
 
     prune_captures()
+
+    threading.Thread(
+        target=notificar_al_servicio_voz,
+        args=(detections[0][0],),
+        daemon=True,
+    ).start()
 
 
 def capture_loop():
@@ -397,3 +405,30 @@ def get_status():
         "total_registered": len(known_faces),
         "esp32_source": system_state["stream_url"],
     }
+
+def notificar_al_servicio_voz(nombre: str):
+    """Envía la alerta al contenedor de audio."""
+    try:
+        url = f"{VOICE_SERVICE_URL}/api/voice/announce"
+        payload = json.dumps({"name": nombre}).encode('utf-8')
+        req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'}, method='POST')
+        urllib.request.urlopen(req, timeout=1.5)
+    except Exception as e:
+        print(f"⚠️ Error notificando a doorbell-voice: {e}")
+
+class VoiceCommandPayload(BaseModel):
+    command: str
+
+@app.post("/api/system/voice-command")
+def receive_voice_command(payload: VoiceCommandPayload):
+    """Recibe la orden procesada por el reconocedor de voz."""
+    cmd = payload.command
+    print(f"📥 [doorbell-api] Comando de voz recibido: {cmd}")
+    
+    if cmd == "OPEN":
+        # Aquí disparas el pulso GPIO del relevador o cerradura
+        print("⚡ [Acción Física]: Activando relevador de cerradura...")
+    elif cmd == "REJECT":
+        print("🔒 [Acción Lógica]: Acceso denegado/silenciado.")
+        
+    return {"status": "ok", "executed": cmd}
