@@ -10,8 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     espeak-ng \
     libespeak-ng1 \
     alsa-utils \
+    libasound2-plugins \
+    pulseaudio-utils \
+    libgomp1 \
     curl \
     unzip \
+    libatomic1 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -24,6 +28,10 @@ RUN set -eux; \
     unzip -q /tmp/vosk-model.zip -d models; \
     rm -f /tmp/vosk-model.zip
 
+ARG PIPER_VOICE=es_MX-claude-high
+RUN python3 -m piper.download_voices ${PIPER_VOICE} --data-dir models/piper
+
+COPY asound.conf /etc/asound.conf
 COPY ./app ./app
 
 EXPOSE 8001

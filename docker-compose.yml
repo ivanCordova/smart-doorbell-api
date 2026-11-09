@@ -26,6 +26,8 @@ services:
   doorbell-voice:
     build:
       context: ./services/voice
+      args:
+        PIPER_VOICE: ${PIPER_VOICE:-es_MX-claude-high}
     container_name: doorbell_voice
     restart: unless-stopped
     privileged: true
@@ -35,8 +37,26 @@ services:
       - "8001"
     environment:
       API_SERVICE_URL: http://doorbell-api:8000
+      PULSE_SERVER: unix:/run/user/${PULSE_UID:-1000}/pulse/native
+      PULSE_COOKIE: /run/pulse-cookie
+      MIC_ENABLED: ${MIC_ENABLED:-false}
+      TTS_ENGINE: ${TTS_ENGINE:-piper}
+      PIPER_VOICE: ${PIPER_VOICE:-es_MX-claude-high}
+      PIPER_VOICE_PATH: /code/models/piper/${PIPER_VOICE:-es_MX-claude-high}.onnx
+      PIPER_LENGTH_SCALE: ${PIPER_LENGTH_SCALE:-1.0}
+      PIPER_VOLUME: ${PIPER_VOLUME:-1.0}
+      ESPEAK_VOICE: ${ESPEAK_VOICE:-roa/es-419}
     volumes:
       - /dev/snd:/dev/snd
+      - type: bind
+        source: /run/user/${PULSE_UID:-1000}/pulse/native
+        target: /run/user/${PULSE_UID:-1000}/pulse/native
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PULSE_COOKIE_PATH:-/home/ivan/.config/pulse/cookie}
+        target: /run/pulse-cookie
+        read_only: true
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"]
       interval: 30s
