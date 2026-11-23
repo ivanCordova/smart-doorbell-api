@@ -27,8 +27,14 @@ VOICE_SERVICE_URL = os.getenv("VOICE_SERVICE_URL", "http://doorbell-voice:8001")
 DETECTOR_MODEL = os.path.join(MODELS_DIR, "face_detection_yunet.onnx")
 RECOGNIZER_MODEL = os.path.join(MODELS_DIR, "face_recognition_sface.onnx")
 
-ALERT_COOLDOWN = 6.0
+# Cadencia de revisión de cámara y cooldown para guardar capturas/historial.
+# El anuncio de voz tiene su propia lógica de visita (ver VISIT_*).
+CAPTURE_COOLDOWN_S = float(os.getenv("CAPTURE_COOLDOWN_S", "6.0"))
 FRAME_CHECK_INTERVAL = 0.5
+# Una visita termina si no se detecta a nadie durante este tiempo.
+VISIT_GAP_S = float(os.getenv("VISIT_GAP_S", "15.0"))
+# Recordatorio mientras la visita siga sin resolver. 0 lo desactiva.
+VISIT_REMINDER_S = float(os.getenv("VISIT_REMINDER_S", "60.0"))
 COSINE_SIMILARITY_THRESHOLD = 0.363
 MAX_HISTORY = 20
 MAX_CAPTURES = 100
@@ -68,7 +74,11 @@ system_state = {
 latest_jpeg_frame: Optional[bytes] = None
 active_capture: Optional[cv2.VideoCapture] = None
 
-state_lock = threading.Lock()
+# Visita en curso: se crea con la primera detección, se refresca mientras
+# haya caras y se cierra por timeout o cuando llega una orden reconocida.
+active_visit: Optional[dict] = None
+
+state_lock = threading.RLock()
 model_lock = threading.Lock()
 capture_lock = threading.Lock()
 
@@ -159,6 +169,71 @@ def prune_captures():
             pass
 
 
+def actualizar_visita(
+    detections: List[Tuple[str, Tuple[int, int, int, int]]], ahora: float
+) -> Tuple[Optional[str], Optional[str]]:
+    """Actualiza la visita activa y devuelve ``(motivo, nombre)`` si debe hablar."""
+    global active_visit
+
+    nombres = [name for name, _ in detections if name]
+    if not nombres:
+        return None, None
+
+    with state_lock:
+        if active_visit is None or (ahora - active_visit["ultima_vista"] > VISIT_GAP_S):
+            active_visit = {
+                "nombres": set(nombres),
+                "primera_vista": ahora,
+                "ultima_vista": ahora,
+                "anunciado_en": ahora,
+                "resuelta": False,
+                "ultimo_motivo": "nueva_visita",
+            }
+            return "nueva_visita", nombres[0]
+
+        visita = active_visit
+        visita["ultima_vista"] = ahora
+
+        nombres_actuales = set(nombres)
+        nombres_nuevos = nombres_actuales - visita["nombres"]
+        visita["nombres"].update(nombres_actuales)
+
+        if nombres_nuevos:
+            objetivo = next((n for n in nombres if n in nombres_nuevos), nombres[0])
+            visita["anunciado_en"] = ahora
+            visita["resuelta"] = False
+            visita["ultimo_motivo"] = "nueva_persona"
+            return visita["ultimo_motivo"], objetivo
+
+        if visita["resuelta"]:
+            return None, None
+
+        if VISIT_REMINDER_S > 0 and (ahora - visita["anunciado_en"] >= VISIT_REMINDER_S):
+            visita["anunciado_en"] = ahora
+            visita["ultimo_motivo"] = "recordatorio"
+            objetivo = next((n for n in nombres if n != "Desconocido"), nombres[0])
+            return visita["ultimo_motivo"], objetivo
+
+        return None, None
+
+
+def visit_snapshot() -> Optional[dict]:
+    """Vista resumida de la visita para los endpoints de estado."""
+    with state_lock:
+        if active_visit is None:
+            return None
+        ahora = time.time()
+        return {
+            "activa": ahora - active_visit["ultima_vista"] <= VISIT_GAP_S,
+            "nombres": sorted(active_visit["nombres"]),
+            "resuelta": active_visit["resuelta"],
+            "primera_vista": datetime.fromtimestamp(active_visit["primera_vista"]).strftime("%H:%M:%S"),
+            "ultimo_anuncio": datetime.fromtimestamp(active_visit["anunciado_en"]).strftime("%H:%M:%S"),
+            "segundos_desde_anuncio": round(ahora - active_visit["anunciado_en"], 1),
+            "motivo": active_visit["ultimo_motivo"],
+        }
+
+
 def log_detection(frame: np.ndarray, detections: List[Tuple[str, Tuple[int, int, int, int]]]):
     annotated = frame.copy()
     for name, (x, y, w, h) in detections:
@@ -187,12 +262,6 @@ def log_detection(frame: np.ndarray, detections: List[Tuple[str, Tuple[int, int,
 
     prune_captures()
 
-    threading.Thread(
-        target=notificar_al_servicio_voz,
-        args=(detections[0][0],),
-        daemon=True,
-    ).start()
-
 
 def capture_loop():
     global latest_jpeg_frame, active_capture
@@ -214,7 +283,7 @@ def capture_loop():
         system_state["camera_online"] = True
         print(f"Conectado al stream: {url}")
         last_check = 0.0
-        last_alert = 0.0
+        last_capture = 0.0
 
         try:
             while cap.isOpened():
@@ -235,9 +304,19 @@ def capture_loop():
                 if system_state["ai_active"] and (now - last_check >= FRAME_CHECK_INTERVAL):
                     last_check = now
                     detections = detect_and_identify(frame)
-                    if detections and (now - last_alert >= ALERT_COOLDOWN):
-                        last_alert = now
-                        log_detection(frame, detections)
+                    if detections:
+                        motivo, nombre_anuncio = actualizar_visita(detections, now)
+                        if motivo and nombre_anuncio:
+                            print(f"🗣️ [Visit]: {motivo} -> {nombre_anuncio}")
+                            threading.Thread(
+                                target=notificar_al_servicio_voz,
+                                args=(nombre_anuncio,),
+                                daemon=True,
+                            ).start()
+
+                        if now - last_capture >= CAPTURE_COOLDOWN_S:
+                            last_capture = now
+                            log_detection(frame, detections)
 
                 time.sleep(0.01)
         except Exception as e:
@@ -300,6 +379,7 @@ def get_system_status():
             "stream_url": system_state["stream_url"],
             "ai_active": system_state["ai_active"],
             "camera_online": system_state["camera_online"],
+            "active_visit": visit_snapshot(),
             "history": list(system_state["history"]),
         }
 
@@ -404,6 +484,7 @@ def get_status():
         "registered_people": [name for name, _ in known_faces],
         "total_registered": len(known_faces),
         "esp32_source": system_state["stream_url"],
+        "active_visit": visit_snapshot(),
     }
 
 def notificar_al_servicio_voz(nombre: str):
@@ -424,7 +505,13 @@ def receive_voice_command(payload: VoiceCommandPayload):
     """Recibe la orden procesada por el reconocedor de voz."""
     cmd = payload.command
     print(f"📥 [doorbell-api] Comando de voz recibido: {cmd}")
-    
+
+    with state_lock:
+        if active_visit is not None and cmd in {"OPEN", "REJECT", "CHECK"}:
+            active_visit["resuelta"] = True
+            active_visit["ultimo_motivo"] = "resuelta"
+            print("✅ [Visit]: Recordatorios detenidos")
+
     if cmd == "OPEN":
         # Aquí disparas el pulso GPIO del relevador o cerradura
         print("⚡ [Acción Física]: Activando relevador de cerradura...")

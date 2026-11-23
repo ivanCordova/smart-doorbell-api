@@ -40,6 +40,8 @@ NLU_TIMEOUT = float(os.getenv("NLU_TIMEOUT", "2.0"))
 WAKE_WORD = os.getenv("WAKE_WORD", "portero").strip().lower() or "portero"
 WAKE_TIMEOUT = float(os.getenv("WAKE_TIMEOUT", "6.0"))
 WAKE_COOLDOWN = float(os.getenv("WAKE_COOLDOWN", "0.8"))
+# Solo absorbe reintentos HTTP duplicados. La visita y su recordatorio los decide doorbell-api.
+VOICE_DEDUPE_S = float(os.getenv("VOICE_DEDUPE_S", "3.0"))
 
 MIC_ENABLED = os.getenv("MIC_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 AUDIO_INPUT_DEVICE = os.getenv("AUDIO_INPUT_DEVICE") or None
@@ -58,7 +60,10 @@ AUDIO_INPUT_AVAILABLE = False
 AUDIO_OUTPUT_AVAILABLE = False
 tts_engine = None
 piper_voice = None
-tts_lock = threading.Lock()
+# tts_lock serializa la síntesis (puede tardar ~6 s). state_lock protege el
+# estado de la FSM para que las decisiones HTTP no esperen a que termine TTS.
+tts_lock = threading.RLock()
+state_lock = threading.RLock()
 
 print(f"🔈 [Voice Service]: PULSE_SERVER={os.getenv('PULSE_SERVER', '(no definido)')}")
 
@@ -114,6 +119,17 @@ voice_state = {
     "timeout_comando": 0.0,
     "wake_cooldown_until": 0.0,
 }
+announce_state = {
+    "ultimo_nombre": None,
+    "ultimo_ts": 0.0,
+    "motivo": None,
+    "omitidos": 0,
+}
+
+
+def _set_voice_status(nuevo_estado: str):
+    with state_lock:
+        voice_state["status"] = nuevo_estado
 
 # ---------------------------------------------------------
 # 2. Utilidades de Audio y PLN
@@ -163,32 +179,38 @@ def _limpiar_audio_tras_tts():
             break
     rec_wake.Reset()
     rec_command.Reset()
-    voice_state["wake_cooldown_until"] = time.time() + WAKE_COOLDOWN
+    with state_lock:
+        voice_state["wake_cooldown_until"] = time.time() + WAKE_COOLDOWN
+
+
+def _hablar_bajo_lock(texto: str):
+    """Reproduce un texto. Debe llamarse con ``tts_lock`` ya adquirido."""
+    _set_voice_status("ANUNCIANDO")
+    inicio = time.time()
+
+    if piper_voice is not None:
+        try:
+            _hablar_piper(texto)
+            print(f"🔊 [Piper]: {texto} ({time.time() - inicio:.2f}s)")
+            _limpiar_audio_tras_tts()
+            _set_voice_status("ESPERA_WAKEWORD")
+            return
+        except Exception as e:
+            print(f"⚠️ Error Piper: {e}. Usando espeak de respaldo.")
+
+    if _hablar_espeak(texto):
+        print(f"🔊 [Bocina]: {texto} ({time.time() - inicio:.2f}s)")
+    else:
+        print(f"🔊 [Simulación Bocina]: '{texto}'")
+
+    _limpiar_audio_tras_tts()
+    _set_voice_status("ESPERA_WAKEWORD")
 
 
 def hablar(texto: str):
     """Reproducción síncrona controlada."""
     with tts_lock:
-        voice_state["status"] = "ANUNCIANDO"
-        inicio = time.time()
-
-        if piper_voice is not None:
-            try:
-                _hablar_piper(texto)
-                print(f"🔊 [Piper]: {texto} ({time.time() - inicio:.2f}s)")
-                _limpiar_audio_tras_tts()
-                voice_state["status"] = "ESPERA_WAKEWORD"
-                return
-            except Exception as e:
-                print(f"⚠️ Error Piper: {e}. Usando espeak de respaldo.")
-
-        if _hablar_espeak(texto):
-            print(f"🔊 [Bocina]: {texto} ({time.time() - inicio:.2f}s)")
-        else:
-            print(f"🔊 [Simulación Bocina]: '{texto}'")
-
-        _limpiar_audio_tras_tts()
-        voice_state["status"] = "ESPERA_WAKEWORD"
+        _hablar_bajo_lock(texto)
 
 def callback_audio(indata, frames, time_info, status):
     if status:
@@ -242,7 +264,7 @@ def _procesar_comando(comando: str):
     if resultado["cmd"] != "NONE":
         notificar_a_vision(resultado["cmd"])
     rec_wake.Reset()
-    voice_state["status"] = "ESPERA_WAKEWORD"
+    _set_voice_status("ESPERA_WAKEWORD")
 
 def notificar_a_vision(cmd: str):
     """Envía la orden detectada de vuelta al servicio de visión."""
@@ -274,9 +296,14 @@ def background_voice_loop():
         while True:
             data = audio_queue.get()
 
+            with state_lock:
+                estado = voice_state["status"]
+                cooldown = voice_state["wake_cooldown_until"]
+                timeout_comando = voice_state["timeout_comando"]
+
             # Estado 1: Palabra clave
-            if voice_state["status"] == "ESPERA_WAKEWORD":
-                if time.time() < voice_state["wake_cooldown_until"]:
+            if estado == "ESPERA_WAKEWORD":
+                if time.time() < cooldown:
                     continue
                 if rec_wake.AcceptWaveform(data):
                     res = json.loads(rec_wake.Result())
@@ -290,16 +317,17 @@ def background_voice_loop():
                             _procesar_comando(sufijo)
                         else:
                             rec_command.Reset()
-                            voice_state["status"] = "ESCUCHA_COMANDO"
-                            voice_state["timeout_comando"] = time.time() + WAKE_TIMEOUT
+                            _set_voice_status("ESCUCHA_COMANDO")
+                            with state_lock:
+                                voice_state["timeout_comando"] = time.time() + WAKE_TIMEOUT
 
             # Estado 2: Escuchando comando
-            elif voice_state["status"] == "ESCUCHA_COMANDO":
-                if time.time() > voice_state["timeout_comando"]:
+            elif estado == "ESCUCHA_COMANDO":
+                if time.time() > timeout_comando:
                     print("⏱️ Tiempo agotado.")
                     hablar("Cancelado.")
                     rec_wake.Reset()
-                    voice_state["status"] = "ESPERA_WAKEWORD"
+                    _set_voice_status("ESPERA_WAKEWORD")
                     continue
 
                 if rec_command.AcceptWaveform(data):
@@ -330,18 +358,24 @@ def health():
     else:
         motor_tts = "none"
 
-    return {
-        "status": "online",
-        "audio_available": AUDIO_OUTPUT_AVAILABLE,
-        "audio_output_available": AUDIO_OUTPUT_AVAILABLE,
-        "audio_input_available": AUDIO_INPUT_AVAILABLE,
-        "mic_enabled": MIC_ENABLED,
-        "tts_engine": motor_tts,
-        "piper_voice": PIPER_VOICE if piper_voice is not None else None,
-        "voice_status": voice_state["status"],
-        "wake_word": WAKE_WORD,
-        "nlu_service_url": NLU_SERVICE_URL,
-    }
+    with state_lock:
+        ultimo_ts = announce_state["ultimo_ts"]
+        return {
+            "status": "online",
+            "audio_available": AUDIO_OUTPUT_AVAILABLE,
+            "audio_output_available": AUDIO_OUTPUT_AVAILABLE,
+            "audio_input_available": AUDIO_INPUT_AVAILABLE,
+            "mic_enabled": MIC_ENABLED,
+            "tts_engine": motor_tts,
+            "piper_voice": PIPER_VOICE if piper_voice is not None else None,
+            "voice_status": voice_state["status"],
+            "wake_word": WAKE_WORD,
+            "nlu_service_url": NLU_SERVICE_URL,
+            "ultimo_anuncio": announce_state["ultimo_nombre"],
+            "ultimo_anuncio_hace_s": round(time.time() - ultimo_ts, 1) if ultimo_ts else None,
+            "ultimo_motivo": announce_state["motivo"],
+            "anuncios_omitidos": announce_state["omitidos"],
+        }
 
 @app.post("/api/voice/test")
 def test_audio(payload: TestPayload, background_tasks: BackgroundTasks):
@@ -351,15 +385,50 @@ def test_audio(payload: TestPayload, background_tasks: BackgroundTasks):
 
 @app.post("/api/voice/announce")
 def announce_visitor(payload: AlertPayload, background_tasks: BackgroundTasks):
-    """Llamado por doorbell-api cuando detecta una persona."""
-    if payload.name != "Desconocido":
-        frase = f"{payload.name} está en la puerta. Di la palabra clave si deseas dar una orden."
+    """Anuncia al visitante sin pisar una orden en curso.
+
+    La decisión de *cuándo* anunciar (visita nueva o recordatorio) la toma
+    doorbell-api. Aquí solo se protege el estado de audio y se absorben
+    reintentos HTTP duplicados.
+    """
+    nombre = (payload.name or "Desconocido").strip() or "Desconocido"
+    if nombre != "Desconocido":
+        frase = f"{nombre} está en la puerta. Di la palabra clave si deseas dar una orden."
     else:
         frase = "Hay una persona no identificada en la puerta. Di la palabra clave para indicar qué hacer."
 
+    ahora = time.time()
+    with state_lock:
+        estado = voice_state["status"]
+
+        if estado in ("ANUNCIANDO", "ESCUCHA_COMANDO"):
+            motivo = f"omitido_{estado.lower()}"
+            announce_state["motivo"] = motivo
+            announce_state["omitidos"] += 1
+            print(f"🔕 [Voice Service]: Anuncio omitido ({motivo}): {nombre}")
+            return {"status": "ok", "reason": motivo, "spoken": False}
+
+        if (
+            announce_state["ultimo_nombre"] == nombre
+            and ahora - announce_state["ultimo_ts"] < VOICE_DEDUPE_S
+        ):
+            motivo = "omitido_duplicado"
+            announce_state["motivo"] = motivo
+            announce_state["omitidos"] += 1
+            print(f"🔕 [Voice Service]: Anuncio omitido ({motivo}): {nombre}")
+            return {"status": "ok", "reason": motivo, "spoken": False}
+
+        announce_state["ultimo_nombre"] = nombre
+        announce_state["ultimo_ts"] = ahora
+        announce_state["motivo"] = "anunciado"
+        # Reservamos el estado antes de devolver la respuesta HTTP para que
+        # ningún chunk de audio pueda disparar la wake word por medio.
+        voice_state["status"] = "ANUNCIANDO"
+        motivo = "anunciado"
+
     def flujo_anuncio():
-        hablar(frase)
-        voice_state["status"] = "ESPERA_WAKEWORD"
+        with tts_lock:
+            _hablar_bajo_lock(frase)
 
     background_tasks.add_task(flujo_anuncio)
-    return {"status": "ok", "message": "Anuncio programado"}
+    return {"status": "ok", "reason": motivo, "spoken": True}

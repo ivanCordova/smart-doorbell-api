@@ -11,3 +11,5 @@ services/api/models/*
 
 services/voice/models/
 *.pt
+captures/
+known_faces/

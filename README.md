@@ -94,6 +94,10 @@ cp .env.example .env
 | `WAKE_WORD` | Palabra clave que activa al asistente | `portero` |
 | `WAKE_TIMEOUT` | Segundos de espera por la orden tras la palabra clave | `6.0` |
 | `WAKE_COOLDOWN` | Silencio tras cada TTS para evitar eco | `0.8` |
+| `VOICE_DEDUPE_S` | Deduplicación de reintentos HTTP en el servicio de voz | `3.0` |
+| `VISIT_GAP_S` | Sin detecciones durante este tiempo cierra la visita | `15.0` |
+| `VISIT_REMINDER_S` | Recordatorio si la visita sigue sin resolver (`0` desactiva) | `60.0` |
+| `CAPTURE_COOLDOWN_S` | Cadencia para guardar capturas/historial | `6.0` |
 | `NLU_TIMEOUT` | Timeout al consultar `doorbell-nlu` | `2.0` |
 
 Verifica el GID del grupo de audio en el host:
@@ -130,6 +134,8 @@ Bocina: Abriendo la puerta enseguida.
 ```
 
 También funciona con pausa: decir "Portero", esperar el "¿Te escucho?" y luego "no abras" o "quién hay".
+
+El anuncio se hace **una sola vez por visita**. Mientras la persona siga en la puerta, se emite un recordatorio cada `VISIT_REMINDER_S` segundos (60 s por defecto) y se detiene en cuanto llega una orden reconocida (`OPEN`, `REJECT` o `CHECK`). Si la persona desaparece y vuelve, se considera una visita nueva. Los anuncios nunca interrumpen una orden en curso: el estado `active_visit` se puede consultar en `/api/status`.
 
 ## Audio en Raspberry Pi (Bluetooth / PipeWire)
 

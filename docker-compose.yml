@@ -11,6 +11,9 @@ services:
     environment:
       ESP32_STREAM_URL: ${ESP32_STREAM_URL:-http://192.168.68.108/mjpeg}
       VOICE_SERVICE_URL: http://doorbell-voice:8001
+      VISIT_GAP_S: ${VISIT_GAP_S:-15.0}
+      VISIT_REMINDER_S: ${VISIT_REMINDER_S:-60.0}
+      CAPTURE_COOLDOWN_S: ${CAPTURE_COOLDOWN_S:-6.0}
     volumes:
       - ./services/api/captures:/code/captures
       - ./services/api/known_faces:/code/known_faces
@@ -58,9 +61,11 @@ services:
       WAKE_WORD: ${WAKE_WORD:-portero}
       WAKE_TIMEOUT: ${WAKE_TIMEOUT:-6.0}
       WAKE_COOLDOWN: ${WAKE_COOLDOWN:-0.8}
+      VOICE_DEDUPE_S: ${VOICE_DEDUPE_S:-3.0}
       PULSE_SERVER: unix:/run/user/${PULSE_UID:-1000}/pulse/native
       PULSE_COOKIE: /run/pulse-cookie
       MIC_ENABLED: ${MIC_ENABLED:-false}
+      AUDIO_INPUT_DEVICE: ${AUDIO_INPUT_DEVICE:-}
       TTS_ENGINE: ${TTS_ENGINE:-piper}
       PIPER_VOICE: ${PIPER_VOICE:-es_MX-claude-high}
       PIPER_VOICE_PATH: /code/models/piper/${PIPER_VOICE:-es_MX-claude-high}.onnx
