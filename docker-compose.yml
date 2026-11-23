@@ -23,6 +23,22 @@ services:
     depends_on:
       - doorbell-voice
 
+  doorbell-nlu:
+    build:
+      context: ./services/nlu
+    container_name: doorbell_nlu
+    restart: unless-stopped
+    expose:
+      - "8010"
+    environment:
+      API_SERVICE_URL: http://doorbell-api:8000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8010/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   doorbell-voice:
     build:
       context: ./services/voice
@@ -37,6 +53,11 @@ services:
       - "8001"
     environment:
       API_SERVICE_URL: http://doorbell-api:8000
+      NLU_SERVICE_URL: http://doorbell-nlu:8010
+      NLU_TIMEOUT: ${NLU_TIMEOUT:-2.0}
+      WAKE_WORD: ${WAKE_WORD:-portero}
+      WAKE_TIMEOUT: ${WAKE_TIMEOUT:-6.0}
+      WAKE_COOLDOWN: ${WAKE_COOLDOWN:-0.8}
       PULSE_SERVER: unix:/run/user/${PULSE_UID:-1000}/pulse/native
       PULSE_COOKIE: /run/pulse-cookie
       MIC_ENABLED: ${MIC_ENABLED:-false}
@@ -63,3 +84,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    depends_on:
+      doorbell-nlu:
+        condition: service_healthy

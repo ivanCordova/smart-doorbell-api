@@ -34,6 +34,12 @@ AUDIO_CHANNELS = 1
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODEL_PATH = str(BASE_DIR / "models" / "vosk-model-small-es-0.42")
 API_SERVICE_URL = os.getenv("API_SERVICE_URL", "http://doorbell-api:8000")
+NLU_SERVICE_URL = os.getenv("NLU_SERVICE_URL", "http://doorbell-nlu:8010").rstrip("/")
+NLU_TIMEOUT = float(os.getenv("NLU_TIMEOUT", "2.0"))
+
+WAKE_WORD = os.getenv("WAKE_WORD", "portero").strip().lower() or "portero"
+WAKE_TIMEOUT = float(os.getenv("WAKE_TIMEOUT", "6.0"))
+WAKE_COOLDOWN = float(os.getenv("WAKE_COOLDOWN", "0.8"))
 
 MIC_ENABLED = os.getenv("MIC_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 AUDIO_INPUT_DEVICE = os.getenv("AUDIO_INPUT_DEVICE") or None
@@ -99,13 +105,14 @@ except Exception as e:
 # Carga de modelo acústico Vosk
 print(f"Cargando Vosk desde {MODEL_PATH}...")
 vosk_model = Model(MODEL_PATH)
-rec_wake = KaldiRecognizer(vosk_model, AUDIO_RATE, '["asistente", "timbre", "[unk]"]')
+rec_wake = KaldiRecognizer(vosk_model, AUDIO_RATE, json.dumps([WAKE_WORD, "[unk]"]))
 rec_command = KaldiRecognizer(vosk_model, AUDIO_RATE)
 
 audio_queue = queue.Queue()
 voice_state = {
     "status": "ESPERA_WAKEWORD",  # ESPERA_WAKEWORD, ANUNCIANDO, ESCUCHA_COMANDO
-    "timeout_comando": 0.0
+    "timeout_comando": 0.0,
+    "wake_cooldown_until": 0.0,
 }
 
 # ---------------------------------------------------------
@@ -147,6 +154,18 @@ def _hablar_espeak(texto: str) -> bool:
         return False
 
 
+def _limpiar_audio_tras_tts():
+    """Evita que el eco de la bocina dispare la palabra clave."""
+    while not audio_queue.empty():
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            break
+    rec_wake.Reset()
+    rec_command.Reset()
+    voice_state["wake_cooldown_until"] = time.time() + WAKE_COOLDOWN
+
+
 def hablar(texto: str):
     """Reproducción síncrona controlada."""
     with tts_lock:
@@ -157,6 +176,7 @@ def hablar(texto: str):
             try:
                 _hablar_piper(texto)
                 print(f"🔊 [Piper]: {texto} ({time.time() - inicio:.2f}s)")
+                _limpiar_audio_tras_tts()
                 voice_state["status"] = "ESPERA_WAKEWORD"
                 return
             except Exception as e:
@@ -167,6 +187,7 @@ def hablar(texto: str):
         else:
             print(f"🔊 [Simulación Bocina]: '{texto}'")
 
+        _limpiar_audio_tras_tts()
         voice_state["status"] = "ESPERA_WAKEWORD"
 
 def callback_audio(indata, frames, time_info, status):
@@ -174,18 +195,54 @@ def callback_audio(indata, frames, time_info, status):
         pass
     audio_queue.put(bytes(indata))
 
-def interpretar_intencion(texto: str) -> dict:
-    limpio = re.sub(r'[^a-záéíóúñ0-9\s]', '', texto.lower()).strip()
-    print(f"🧠 [PLN]: Interpretando '{limpio}'")
+def consultar_nlu(texto: str) -> dict:
+    """Pide la intención al servicio doorbell-nlu."""
+    fallback = {
+        "intent": "DESCONOCIDO",
+        "cmd": "NONE",
+        "tts": "No pude procesar la orden en este momento.",
+        "confidence": 0.0,
+    }
+    try:
+        url = f"{NLU_SERVICE_URL}/api/nlu/interpret"
+        payload = json.dumps({"text": texto}).encode('utf-8')
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=NLU_TIMEOUT) as resp:
+            datos = json.loads(resp.read().decode('utf-8'))
+        return {
+            "intent": datos.get("intent", "DESCONOCIDO"),
+            "cmd": datos.get("cmd", "NONE"),
+            "tts": datos.get("tts", fallback["tts"]),
+            "confidence": float(datos.get("confidence", 0.0)),
+        }
+    except Exception as e:
+        print(f"⚠️ [Voice Service] Error consultando doorbell-nlu: {e}")
+        return fallback
 
-    if re.search(r'\b(abre|abrir|ábrela|abreme|adelante|pasa)\b', limpio):
-        return {"intent": "ABRIR_PUERTA", "tts": "Abriendo la puerta enseguida.", "cmd": "OPEN"}
-    elif re.search(r'\b(no|ignora|ignorar|dile que no|rechazar|cerrar)\b', limpio):
-        return {"intent": "RECHAZAR", "tts": "Entendido, no abriré.", "cmd": "REJECT"}
-    elif re.search(r'\b(quién|quien|quiénes|quienes)\b', limpio):
-        return {"intent": "CONSULTA", "tts": "Verificando el registro de la cámara.", "cmd": "CHECK"}
-    else:
-        return {"intent": "DESCONOCIDO", "tts": "No logré entender la instrucción.", "cmd": "NONE"}
+
+def _sufijo_tras_wake(texto: str) -> str:
+    coincidencia = re.search(rf"\b{re.escape(WAKE_WORD)}\b", texto, re.IGNORECASE)
+    if not coincidencia:
+        return ""
+    return texto[coincidencia.end():].strip(" ,.;:¿?¡!")
+
+
+def _procesar_comando(comando: str):
+    resultado = consultar_nlu(comando)
+    print(
+        f"🧠 [Voice Service] '{comando}' -> {resultado['intent']} "
+        f"({resultado['confidence']:.2f})"
+    )
+    hablar(resultado["tts"])
+    if resultado["cmd"] != "NONE":
+        notificar_a_vision(resultado["cmd"])
+    rec_wake.Reset()
+    voice_state["status"] = "ESPERA_WAKEWORD"
 
 def notificar_a_vision(cmd: str):
     """Envía la orden detectada de vuelta al servicio de visión."""
@@ -210,7 +267,7 @@ def background_voice_loop():
         print("🔇 Bucle de micrófono detenido (sin entrada de audio).")
         return
 
-    print("🎤 [Voice Service]: Escuchando activación por palabra clave ('asistente')...")
+    print(f"🎤 [Voice Service]: Escuchando activación por palabra clave ('{WAKE_WORD}')...")
     with sd.RawInputStream(samplerate=AUDIO_RATE, blocksize=8000, dtype='int16',
                            channels=AUDIO_CHANNELS, device=AUDIO_INPUT_DEVICE,
                            callback=callback_audio):
@@ -219,17 +276,22 @@ def background_voice_loop():
 
             # Estado 1: Palabra clave
             if voice_state["status"] == "ESPERA_WAKEWORD":
+                if time.time() < voice_state["wake_cooldown_until"]:
+                    continue
                 if rec_wake.AcceptWaveform(data):
                     res = json.loads(rec_wake.Result())
                     txt = res.get("text", "")
-                    if any(w in txt for w in ["asistente", "timbre"]):
+                    if re.search(rf"\b{re.escape(WAKE_WORD)}\b", txt, re.IGNORECASE):
                         print(f"🔔 Wake word detectada: {txt}")
                         hablar("¿Te escucho?")
-                        while not audio_queue.empty():
-                            audio_queue.get_nowait()
-                        rec_command.Reset()
-                        voice_state["status"] = "ESCUCHA_COMANDO"
-                        voice_state["timeout_comando"] = time.time() + 6.0
+                        sufijo = _sufijo_tras_wake(txt)
+                        if sufijo:
+                            print(f"🗣️ Orden en la misma frase: '{sufijo}'")
+                            _procesar_comando(sufijo)
+                        else:
+                            rec_command.Reset()
+                            voice_state["status"] = "ESCUCHA_COMANDO"
+                            voice_state["timeout_comando"] = time.time() + WAKE_TIMEOUT
 
             # Estado 2: Escuchando comando
             elif voice_state["status"] == "ESCUCHA_COMANDO":
@@ -244,12 +306,7 @@ def background_voice_loop():
                     res = json.loads(rec_command.Result())
                     comando = res.get("text", "").strip()
                     if comando:
-                        resultado = interpretar_intencion(comando)
-                        hablar(resultado["tts"])
-                        if resultado["cmd"] != "NONE":
-                            notificar_a_vision(resultado["cmd"])
-                        rec_wake.Reset()
-                        voice_state["status"] = "ESPERA_WAKEWORD"
+                        _procesar_comando(comando)
 
 # ---------------------------------------------------------
 # 4. Endpoints HTTP para ser llamado por doorbell-api
@@ -282,6 +339,8 @@ def health():
         "tts_engine": motor_tts,
         "piper_voice": PIPER_VOICE if piper_voice is not None else None,
         "voice_status": voice_state["status"],
+        "wake_word": WAKE_WORD,
+        "nlu_service_url": NLU_SERVICE_URL,
     }
 
 @app.post("/api/voice/test")
@@ -294,22 +353,13 @@ def test_audio(payload: TestPayload, background_tasks: BackgroundTasks):
 def announce_visitor(payload: AlertPayload, background_tasks: BackgroundTasks):
     """Llamado por doorbell-api cuando detecta una persona."""
     if payload.name != "Desconocido":
-        frase = f"{payload.name} está en la puerta. ¿Deseas abrir?"
+        frase = f"{payload.name} está en la puerta. Di la palabra clave si deseas dar una orden."
     else:
-        frase = "Hay una persona no identificada en la puerta. ¿Qué deseas hacer?"
+        frase = "Hay una persona no identificada en la puerta. Di la palabra clave para indicar qué hacer."
 
     def flujo_anuncio():
         hablar(frase)
-        if not (MIC_ENABLED and AUDIO_INPUT_AVAILABLE):
-            voice_state["status"] = "ESPERA_WAKEWORD"
-            return
-
-        # Tras anunciarlo, abre directamente la ventana de escucha sin pedir wake word
-        while not audio_queue.empty():
-            audio_queue.get_nowait()
-        rec_command.Reset()
-        voice_state["status"] = "ESCUCHA_COMANDO"
-        voice_state["timeout_comando"] = time.time() + 7.0
+        voice_state["status"] = "ESPERA_WAKEWORD"
 
     background_tasks.add_task(flujo_anuncio)
     return {"status": "ok", "message": "Anuncio programado"}
