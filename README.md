@@ -8,7 +8,7 @@ Infraestructura unificada de un videoportero inteligente para **ESP32-CAM**. Est
 |---|---|---|---|
 | `services/api` | `doorbell_api` | `8000` | Gateway de video: recibe el stream MJPEG, detecta/reconoce rostros, registra eventos y expone el panel web. |
 | `services/voice` | `doorbell_voice` | `8001` | Servicio de voz: wake word "Portero", captura con Vosk y respuestas por TTS (Piper neuronal, respaldo espeak). |
-| `services/nlu` | `doorbell_nlu` | `8010` (interno) | Procesamiento de lenguaje natural: convierte la orden en una intención (`OPEN`, `REJECT`, `CHECK`) con reglas y sin dependencias de ML. |
+| `services/nlu` | `doorbell_nlu` | `8010` (interno) | PLN de 4 capas: normalización léxica, dependencias con spaCy y ontología de acceso; devuelve intención, individuo y estado. |
 
 Flujo de integración:
 
@@ -33,7 +33,8 @@ Cuando `doorbell-api` detecta una persona, notifica a `doorbell-voice` en `/api/
 - Registro de personas con foto subida o capturada desde el stream.
 - Historial de eventos con la imagen anotada.
 - Wake word configurable (por defecto "Portero") y captura de comandos en español con Vosk.
-- PLN determinista en un servicio aparte: normaliza acentos, ignora muletillas y resuelve negaciones ("no abras" ≠ "abre").
+- PLN modular: normaliza conservando acentos, ignora muletillas, extrae lemas/dependencias con spaCy y bloquea negaciones ("no abras" ≠ "abre").
+- Ontología de acceso: resuelve sinónimos (`zaguán` → `PORTON_COCHERA`), valida estado y evita re-disparar hardware en órdenes redundantes.
 - Anuncios y respuestas por TTS neuronal con Piper (respaldo espeak).
 - Mitigación de eco: se descarta el audio capturado durante el TTS y se aplica un cooldown antes de volver a escuchar la palabra clave.
 - Persistencia simple: metadatos en `services/api/known_faces/persons.json` y capturas en `services/api/captures/`.
@@ -55,13 +56,19 @@ Cuando `doorbell-api` detecta una persona, notifica a `doorbell-voice` en `/api/
 │   │   ├── .dockerignore
 │   │   └── requirements.txt
 │   ├── voice/
-│   │   ├── app/voice_service.py
+│   │   ├── app/audio_asr.py          # Capa acústica: sounddevice + Vosk (WFST)
+│   │   ├── app/voice_service.py      # Wake word, FSM y TTS
 │   │   ├── Dockerfile
 │   │   ├── .dockerignore
 │   │   └── requirements.txt
 │   └── nlu/
-│       ├── app/intents.py
-│       ├── app/nlu_service.py
+│       ├── app/preprocesador.py      # Capa léxica (regex precompiladas)
+│       ├── app/analizador_sintactico.py  # spaCy: ROOT, lemas, obj/obl/nmod, negación
+│       ├── app/ontologia.py          # Clases, individuos y axiomas de estado
+│       ├── app/actuador.py           # Ejecución simulada / hook de hardware
+│       ├── app/main.py               # Orquestación y prueba en consola
+│       ├── app/intents.py            # Frases legacy de compatibilidad
+│       ├── app/nlu_service.py        # Adaptador HTTP
 │       ├── Dockerfile
 │       ├── .dockerignore
 │       └── requirements.txt
@@ -78,6 +85,7 @@ Las imágenes descargan automáticamente los modelos durante el build:
 
 - API: modelos ONNX de OpenCV Zoo (`YuNet` + `SFace`) si no están en `services/api/models/`.
 - Voz: `vosk-model-small-es-0.42` desde `alphacephei.com`.
+- NLU: `es_core_news_sm` de spaCy (se descarga durante el build).
 
 ## Configuración
 
@@ -272,21 +280,42 @@ Ejemplo de respuesta:
 
 ```json
 {
+  "estado": "ACCION_NEGADA",
   "intent": "RECHAZAR",
   "cmd": "REJECT",
   "tts": "Entendido, no abriré.",
-  "confidence": 0.99,
-  "texto_normalizado": "no abras la puerta"
+  "confidence": 0.95,
+  "accion": null,
+  "individuo": null,
+  "texto_normalizado": "no abras la puerta",
+  "debug": {
+    "analisis": {
+      "valido": true,
+      "lema_accion": "abrir",
+      "lemas_objetivo": ["puerta"],
+      "negado": true
+    }
+  }
 }
 ```
 
+Estados posibles: `LISTO`, `ACCION_NEGADA`, `FUERA_DOMINIO`, `REDUNDANTE`,
+`REQUIERE_PIN` y `COMPATIBILIDAD` (frases heredadas). La trazabilidad en
+consola muestra `[LÉXICO]`, `[SINTÁCTICO]`, `[ONTOLOGÍA]`, `[ACCIÓN]` y,
+cuando aplica, `[COMPATIBILIDAD]`.
+
 Frases admitidas:
 
-| Intención | Ejemplos |
-|---|---|
-| `ABRIR_PUERTA` | "abre la puerta", "deja entrar", "pasa", "adelante", "sí" |
-| `RECHAZAR` | "no abras", "dile que no", "rechazar", "cierra", "no lo dejes entrar" |
-| `CONSULTA` | "quién está", "hay alguien", "cuántas personas hay" |
+| Intención | Individuo | Ejemplos |
+|---|---|---|
+| `ABRIR_PUERTA` | `PUERTA_PRINCIPAL` / `PORTON_COCHERA` | "abre la puerta", "desbloquea el zaguán de la cochera", "abre la reja" |
+| `RECHAZAR` | `PUERTA_PRINCIPAL` / `PORTON_COCHERA` | "no abras el portón", "cierra la puerta", "tranca el garaje" |
+| `CONSULTA` | — | "quién hay", "hay alguien", "revisa la cámara" |
+| `DESCONOCIDO` | — | "hoy hace mucho calor afuera" |
+
+Las frases del prototipo que la ontología no modela ("deja entrar",
+"adelante", "sí") siguen funcionando vía `intents.py` y se marcan con
+`estado: COMPATIBILIDAD`.
 
 ## Ejecución local sin Docker
 
@@ -323,9 +352,18 @@ cd services/nlu
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+python -m spacy download es_core_news_sm
 
 export API_SERVICE_URL="http://localhost:8000"
 uvicorn app.nlu_service:app --host 0.0.0.0 --port 8010
+```
+
+Prueba de los casos de aceptación del pipeline (sin micrófono ni Docker):
+
+```bash
+cd services/nlu
+python -m app.main --verificar
+python -m app.main "abre la puerta"   # una sola frase
 ```
 
 Para la ejecución local del servicio de voz necesitas descargar el modelo Vosk en `services/voice/models/`:
@@ -341,5 +379,6 @@ unzip -q /tmp/vosk.zip -d services/voice/models
 - Si no hay coincidencia, la persona se marca como **Desconocido** y la captura se resalta en rojo.
 - Las capturas antiguas se eliminan automáticamente al superar `MAX_CAPTURES`.
 - Las notificaciones al servicio de voz se envían en un hilo aparte para no bloquear el bucle de captura.
-- El NLU es determinista y no descarga modelos: normaliza el texto, puntúa patrones por intención y prioriza la negación sobre "abre".
+- El NLU usa un modelo spaCy local (`es_core_news_sm`): normaliza, extrae el núcleo verbal y sus dependencias, detecta negación con `advmod` y valida la intención contra la ontología antes de ejecutar.
+- El estado de `PUERTA_PRINCIPAL`, `PORTON_COCHERA` y `CAMARA_EXTERIOR` vive en memoria dentro de `doorbell-nlu`; se reinicia al recrear el contenedor. `/health` lo expone en `estados`.
 - Si `doorbell-nlu` no responde, el servicio de voz responde "No pude procesar la orden en este momento" y no envía ninguna orden al API.

@@ -1,7 +1,6 @@
 import os
 import json
 import re
-import queue
 import time
 import threading
 import subprocess
@@ -11,9 +10,9 @@ from pathlib import Path
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import sounddevice as sd
-from vosk import Model, KaldiRecognizer
 import pyttsx3
 import urllib.request
+from app.audio_asr import MODEL_PATH, ReconocedorVosk
 
 try:
     from piper import PiperVoice, SynthesisConfig
@@ -29,10 +28,7 @@ app = FastAPI(title="Doorbell Voice Service")
 # ---------------------------------------------------------
 # 1. Configuración de Modelos y Hardware
 # ---------------------------------------------------------
-AUDIO_RATE = 16000
-AUDIO_CHANNELS = 1
 BASE_DIR = Path(__file__).resolve().parent.parent
-MODEL_PATH = str(BASE_DIR / "models" / "vosk-model-small-es-0.42")
 API_SERVICE_URL = os.getenv("API_SERVICE_URL", "http://doorbell-api:8000")
 NLU_SERVICE_URL = os.getenv("NLU_SERVICE_URL", "http://doorbell-nlu:8010").rstrip("/")
 NLU_TIMEOUT = float(os.getenv("NLU_TIMEOUT", "2.0"))
@@ -107,13 +103,12 @@ try:
 except Exception as e:
     print(f"⚠️ [Voice Service]: Audio no disponible ({e}). Operando en modo log.")
 
-# Carga de modelo acústico Vosk
+# Capa acústica: modelo Vosk, recognizers y cola de audio.
 print(f"Cargando Vosk desde {MODEL_PATH}...")
-vosk_model = Model(MODEL_PATH)
-rec_wake = KaldiRecognizer(vosk_model, AUDIO_RATE, json.dumps([WAKE_WORD, "[unk]"]))
-rec_command = KaldiRecognizer(vosk_model, AUDIO_RATE)
-
-audio_queue = queue.Queue()
+asr = ReconocedorVosk(wake_word=WAKE_WORD, device=AUDIO_INPUT_DEVICE)
+rec_wake = asr.rec_wake
+rec_command = asr.rec_command
+audio_queue = asr.audio_queue
 voice_state = {
     "status": "ESPERA_WAKEWORD",  # ESPERA_WAKEWORD, ANUNCIANDO, ESCUCHA_COMANDO
     "timeout_comando": 0.0,
@@ -172,13 +167,7 @@ def _hablar_espeak(texto: str) -> bool:
 
 def _limpiar_audio_tras_tts():
     """Evita que el eco de la bocina dispare la palabra clave."""
-    while not audio_queue.empty():
-        try:
-            audio_queue.get_nowait()
-        except queue.Empty:
-            break
-    rec_wake.Reset()
-    rec_command.Reset()
+    asr.limpiar()
     with state_lock:
         voice_state["wake_cooldown_until"] = time.time() + WAKE_COOLDOWN
 
@@ -211,11 +200,6 @@ def hablar(texto: str):
     """Reproducción síncrona controlada."""
     with tts_lock:
         _hablar_bajo_lock(texto)
-
-def callback_audio(indata, frames, time_info, status):
-    if status:
-        pass
-    audio_queue.put(bytes(indata))
 
 def consultar_nlu(texto: str) -> dict:
     """Pide la intención al servicio doorbell-nlu."""
@@ -290,9 +274,7 @@ def background_voice_loop():
         return
 
     print(f"🎤 [Voice Service]: Escuchando activación por palabra clave ('{WAKE_WORD}')...")
-    with sd.RawInputStream(samplerate=AUDIO_RATE, blocksize=8000, dtype='int16',
-                           channels=AUDIO_CHANNELS, device=AUDIO_INPUT_DEVICE,
-                           callback=callback_audio):
+    with asr.stream():
         while True:
             data = audio_queue.get()
 

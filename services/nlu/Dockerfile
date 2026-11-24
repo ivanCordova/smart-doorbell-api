@@ -8,6 +8,9 @@ WORKDIR /code
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Modelo sintáctico en español; se descarga una vez durante el build.
+RUN python -m spacy download es_core_news_sm
+
 COPY ./app ./app
 
 EXPOSE 8010

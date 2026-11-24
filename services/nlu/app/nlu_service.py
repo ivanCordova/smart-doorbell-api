@@ -6,7 +6,9 @@ from typing import List, Tuple
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from app.intents import INTENTS, interpretar
+from app.intents import INTENTS
+from app.main import clasificar_texto, procesar_texto
+from app.ontologia import estados_actuales
 
 app = FastAPI(title="Doorbell NLU Service")
 
@@ -54,6 +56,7 @@ def health():
         "status": "online",
         "api_service_url": API_SERVICE_URL,
         "intents": list(INTENTS.keys()),
+        "estados": estados_actuales(),
     }
 
 
@@ -68,14 +71,20 @@ def listar_intents():
 @app.post("/api/nlu/interpret")
 def interpretar_texto(payload: InterpretPayload):
     texto = payload.text.strip()
-    resultado = interpretar(texto)
 
-    if resultado["intent"] == "CONSULTA":
+    # Primero se clasifica sin ejecutar: solo así sabemos si la respuesta
+    # CHECK necesita consultar el contexto real de visitas al API.
+    previo = clasificar_texto(texto, trazar=False)
+    if previo["cmd"] == "CHECK":
         personas, deteccion = _contexto_visitas()
-        resultado = interpretar(texto, personas=personas, ultima_deteccion=deteccion)
+    else:
+        personas, deteccion = [], []
 
+    resultado = procesar_texto(
+        texto, personas=personas, ultima_deteccion=deteccion
+    )
     print(
         f"🧠 [NLU] '{texto}' -> {resultado['intent']} "
-        f"({resultado['confidence']:.2f})"
+        f"({resultado['confidence']:.2f}) [{resultado['estado']}]"
     )
     return resultado
